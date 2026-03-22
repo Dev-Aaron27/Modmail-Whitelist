@@ -106,6 +106,78 @@ class Whitelist(commands.Cog):
     def make_embed(self, title, description, color=discord.Color.blurple()):
         return discord.Embed(title=title, description=description, color=color)
 
+    async def close_thread_if_needed(self, user):
+        thread = None
+
+        if hasattr(self.bot, "threads"):
+            cache = getattr(self.bot, "threads", None)
+
+            if isinstance(cache, dict):
+                thread = cache.get(user.id) or cache.get(str(user.id))
+
+            if thread is None and hasattr(cache, "find"):
+                try:
+                    maybe = cache.find(recipient_id=user.id)
+                    if maybe:
+                        thread = maybe
+                except Exception:
+                    pass
+
+        if thread is None and hasattr(self.bot, "thread_manager"):
+            manager = getattr(self.bot, "thread_manager", None)
+            if manager:
+                for method_name in ("find", "get", "find_thread", "get_thread"):
+                    method = getattr(manager, method_name, None)
+                    if callable(method):
+                        try:
+                            maybe = method(user.id)
+                            if maybe:
+                                thread = await maybe if hasattr(maybe, "__await__") else maybe
+                                break
+                        except Exception:
+                            pass
+
+        if thread is None:
+            return
+
+        close = getattr(thread, "close", None)
+        if callable(close):
+            try:
+                await close(
+                    closer=self.bot.user,
+                    silent=True,
+                    delete_channel=True,
+                    message="User failed whitelist check."
+                )
+                return
+            except TypeError:
+                try:
+                    await close(
+                        closer=self.bot.user,
+                        message="User failed whitelist check."
+                    )
+                    return
+                except Exception:
+                    pass
+            except Exception:
+                pass
+
+        channel = getattr(thread, "channel", None)
+        if isinstance(channel, discord.TextChannel):
+            try:
+                embed = discord.Embed(
+                    title="Whitelist Blocked",
+                    description="This thread was closed because the user does not have a whitelisted role.",
+                    color=discord.Color.red()
+                )
+                await channel.send(embed=embed)
+            except Exception:
+                pass
+            try:
+                await channel.delete(reason="User failed whitelist role check.")
+            except Exception:
+                pass
+
     @commands.group(name="whitelist", invoke_without_command=True)
     @commands.guild_only()
     @commands.has_permissions(administrator=True)
@@ -224,6 +296,27 @@ class Whitelist(commands.Cog):
 
         await self.update_config(deny_message=message)
         await ctx.send(embed=self.make_embed("Deny Message Updated", message, discord.Color.green()))
+
+    @commands.Cog.listener()
+    async def on_message(self, message):
+        if message.author.bot:
+            return
+
+        if message.guild is not None:
+            return
+
+        allowed = await self.is_allowed(message.author)
+        if allowed:
+            return
+
+        await self.send_deny_message(message.author)
+
+        try:
+            await message.add_reaction("⛔")
+        except Exception:
+            pass
+
+        await self.close_thread_if_needed(message.author)
 
     @commands.Cog.listener()
     async def on_thread_initiate(self, thread, creator, category, initial_message):
