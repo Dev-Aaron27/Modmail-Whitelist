@@ -11,16 +11,6 @@ class AutoCorrect(commands.Cog):
         self.bot = bot
         self.coll = bot.api.get_plugin_partition(self)
         self.patched_commands = {}
-        self.message_param_names = {
-            "msg",
-            "message",
-            "text",
-            "content",
-            "body",
-            "reply",
-            "response",
-            "value",
-        }
 
         self.default_target_commands = [
             "reply",
@@ -34,9 +24,22 @@ class AutoCorrect(commands.Cog):
             "fr",
             "fpr",
             "far",
+            "a",
             "snippet",
             "snippets",
+            "s",
         ]
+
+        self.preferred_param_names = {
+            "msg",
+            "message",
+            "text",
+            "content",
+            "body",
+            "reply",
+            "response",
+            "value",
+        }
 
         self.word_map = {
             "u": "you",
@@ -177,7 +180,6 @@ class AutoCorrect(commands.Cog):
             "wqork": "work",
             "rgohjt": "right",
             "fukl": "full",
-            "yo": "yo",
         }
 
         self.phrase_map = {
@@ -265,34 +267,25 @@ class AutoCorrect(commands.Cog):
             r"\bive sent\b": "I've sent",
             r"\bive made\b": "I've made",
             r"\bive been\b": "I've been",
-            r"\byo bro\b": "Yo, bro",
-            r"\byo man\b": "Yo, man",
-            r"\byo dude\b": "Yo, dude",
         }
 
     async def cog_load(self):
         await self.coll.update_one(
             {"_id": "config"},
-            {
-                "$setOnInsert": {
-                    "enabled": True,
-                    "target_commands": self.default_target_commands,
-                }
-            },
+            {"$setOnInsert": {"enabled": True, "target_commands": self.default_target_commands}},
             upsert=True,
         )
 
     async def on_plugins_ready(self):
         await self.patch_commands()
 
+    async def cog_unload(self):
+        await self.unpatch_commands()
+
     async def get_config(self):
         data = await self.coll.find_one({"_id": "config"})
         if not data:
-            data = {
-                "_id": "config",
-                "enabled": True,
-                "target_commands": self.default_target_commands,
-            }
+            data = {"_id": "config", "enabled": True, "target_commands": self.default_target_commands}
             await self.coll.insert_one(data)
         return data
 
@@ -304,10 +297,7 @@ class AutoCorrect(commands.Cog):
 
     def fix_tokens(self, text):
         parts = re.split(r"(\s+)", text)
-        fixed = []
-        for part in parts:
-            fixed.append(self.word_map.get(part.lower(), part))
-        return "".join(fixed)
+        return "".join(self.word_map.get(part.lower(), part) for part in parts)
 
     def fix_common_patterns(self, text):
         text = re.sub(r"\bim\b", "I'm", text, flags=re.IGNORECASE)
@@ -333,7 +323,6 @@ class AutoCorrect(commands.Cog):
     def add_punctuation(self, text):
         if not text:
             return text
-
         stripped = text.rstrip()
         if stripped.endswith(("!", "?", ".", "...")):
             return stripped
@@ -387,26 +376,42 @@ class AutoCorrect(commands.Cog):
                 return True
         return False
 
-    def _get_correctable_param_names(self, callback):
+    def _get_signature(self, callback):
         try:
-            sig = inspect.signature(callback)
+            return inspect.signature(callback)
         except Exception:
-            return []
+            return None
 
-        found = []
-        for name, param in sig.parameters.items():
+    def _find_string_targets(self, bound):
+        targets = []
+
+        for name, value in bound.arguments.items():
             lowered = name.lower()
             if lowered in {"self", "ctx", "context"}:
                 continue
-            if lowered in self.message_param_names:
-                found.append(name)
+            if not isinstance(value, str):
+                continue
 
-        return found
+            if lowered in self.preferred_param_names:
+                targets.append(("named", name))
+                continue
+
+        if targets:
+            return targets
+
+        for name, value in reversed(list(bound.arguments.items())):
+            lowered = name.lower()
+            if lowered in {"self", "ctx", "context"}:
+                continue
+            if isinstance(value, str):
+                targets.append(("named", name))
+                break
+
+        return targets
 
     async def patch_commands(self):
         config = await self.get_config()
         target_names = [x.lower() for x in config.get("target_commands", self.default_target_commands)]
-        patched_any = False
 
         for command in self.bot.walk_commands():
             if not self._command_matches(command, target_names):
@@ -417,60 +422,40 @@ class AutoCorrect(commands.Cog):
                 continue
 
             original = command.callback
-            param_names = self._get_correctable_param_names(original)
-            if not param_names:
+            signature = self._get_signature(original)
+            if signature is None:
                 continue
 
             @wraps(original)
-            async def wrapped(*args, __original=original, __param_names=param_names, **kwargs):
+            async def wrapped(*args, __original=original, __signature=signature, **kwargs):
                 cfg = await self.get_config()
                 if not cfg.get("enabled", True):
                     return await __original(*args, **kwargs)
 
                 try:
-                    sig = inspect.signature(__original)
-                    bound = sig.bind_partial(*args, **kwargs)
+                    bound = __signature.bind_partial(*args, **kwargs)
                 except Exception:
                     return await __original(*args, **kwargs)
 
                 changed = False
+                targets = self._find_string_targets(bound)
 
-                for param_name in __param_names:
-                    if param_name in bound.arguments and isinstance(bound.arguments[param_name], str):
-                        original_text = bound.arguments[param_name]
-                        corrected_text = self.autocorrect_text(original_text)
-                        if corrected_text != original_text:
-                            bound.arguments[param_name] = corrected_text
-                            changed = True
+                for kind, target in targets:
+                    if kind == "named":
+                        original_text = bound.arguments.get(target)
+                        if isinstance(original_text, str):
+                            corrected_text = self.autocorrect_text(original_text)
+                            if corrected_text != original_text:
+                                bound.arguments[target] = corrected_text
+                                changed = True
 
-                if not changed:
-                    for name, value in list(bound.arguments.items()):
-                        lowered = name.lower()
-                        if lowered in {"self", "ctx", "context"}:
-                            continue
-                        if lowered not in self.message_param_names:
-                            continue
-                        if not isinstance(value, str):
-                            continue
-
-                        corrected_text = self.autocorrect_text(value)
-                        if corrected_text != value:
-                            bound.arguments[name] = corrected_text
-                            changed = True
-
-                if hasattr(bound, "args") and hasattr(bound, "kwargs"):
+                if changed:
                     return await __original(*bound.args, **bound.kwargs)
 
                 return await __original(*args, **kwargs)
 
-            self.patched_commands[key] = {
-                "command": command,
-                "original": original,
-            }
+            self.patched_commands[key] = {"command": command, "original": original}
             command.callback = wrapped
-            patched_any = True
-
-        return patched_any
 
     async def unpatch_commands(self):
         for data in self.patched_commands.values():
@@ -486,7 +471,7 @@ class AutoCorrect(commands.Cog):
 
         embed = discord.Embed(title="AutoCorrect Settings", color=discord.Color.blurple())
         embed.add_field(name="Enabled", value="Yes" if config.get("enabled", True) else "No", inline=False)
-        embed.add_field(name="Patched Commands", value=", ".join(f"`{x}`" for x in targets[:30]) or "None", inline=False)
+        embed.add_field(name="Patched Commands", value=", ".join(f"`{x}`" for x in targets) or "None", inline=False)
         embed.add_field(
             name="Commands",
             value=(
@@ -508,14 +493,14 @@ class AutoCorrect(commands.Cog):
     @commands.has_permissions(administrator=True)
     async def autocorrect_enable(self, ctx):
         await self.update_config(enabled=True)
-        await ctx.send(embed=self.make_embed("AutoCorrect Enabled", "Reply-style commands will now autocorrect their message text.", discord.Color.green()))
+        await ctx.send(embed=self.make_embed("AutoCorrect Enabled", "Reply, anonymous reply, and snippet-style commands will now autocorrect.", discord.Color.green()))
 
     @autocorrect_group.command(name="disable")
     @commands.guild_only()
     @commands.has_permissions(administrator=True)
     async def autocorrect_disable(self, ctx):
         await self.update_config(enabled=False)
-        await ctx.send(embed=self.make_embed("AutoCorrect Disabled", "Reply-style commands will no longer autocorrect their message text.", discord.Color.orange()))
+        await ctx.send(embed=self.make_embed("AutoCorrect Disabled", "Target commands will no longer autocorrect.", discord.Color.orange()))
 
     @autocorrect_group.command(name="test")
     @commands.guild_only()
@@ -542,15 +527,14 @@ class AutoCorrect(commands.Cog):
         config = await self.get_config()
         targets = list(config.get("target_commands", self.default_target_commands))
 
-        lowered = command_name.lower()
-        if lowered in [x.lower() for x in targets]:
+        if command_name.lower() in [x.lower() for x in targets]:
             return await ctx.send(embed=self.make_embed("Already Added", f"`{command_name}` is already in the target list.", discord.Color.orange()))
 
         targets.append(command_name)
         await self.update_config(target_commands=targets)
         await self.unpatch_commands()
         await self.patch_commands()
-        await ctx.send(embed=self.make_embed("Command Added", f"`{command_name}` has been added and commands were repatched.", discord.Color.green()))
+        await ctx.send(embed=self.make_embed("Command Added", f"`{command_name}` was added and the plugin repatched commands.", discord.Color.green()))
 
     @autocorrect_group.command(name="removecmd")
     @commands.guild_only()
@@ -558,15 +542,15 @@ class AutoCorrect(commands.Cog):
     async def autocorrect_removecmd(self, ctx, command_name: str):
         config = await self.get_config()
         targets = list(config.get("target_commands", self.default_target_commands))
-
         new_targets = [x for x in targets if x.lower() != command_name.lower()]
+
         if len(new_targets) == len(targets):
             return await ctx.send(embed=self.make_embed("Not Found", f"`{command_name}` is not in the target list.", discord.Color.orange()))
 
         await self.update_config(target_commands=new_targets)
         await self.unpatch_commands()
         await self.patch_commands()
-        await ctx.send(embed=self.make_embed("Command Removed", f"`{command_name}` has been removed and commands were repatched.", discord.Color.green()))
+        await ctx.send(embed=self.make_embed("Command Removed", f"`{command_name}` was removed and the plugin repatched commands.", discord.Color.green()))
 
     @autocorrect_group.command(name="resetcmds")
     @commands.guild_only()
@@ -575,19 +559,15 @@ class AutoCorrect(commands.Cog):
         await self.update_config(target_commands=self.default_target_commands)
         await self.unpatch_commands()
         await self.patch_commands()
-        await ctx.send(embed=self.make_embed("Commands Reset", "Target commands were reset to the default reply-style list.", discord.Color.green()))
+        await ctx.send(embed=self.make_embed("Commands Reset", "Target commands were reset to the defaults, including `.s` and `.a`.", discord.Color.green()))
 
     @autocorrect_group.command(name="repatch")
     @commands.guild_only()
     @commands.has_permissions(administrator=True)
     async def autocorrect_repatch(self, ctx):
         await self.unpatch_commands()
-        patched = await self.patch_commands()
-        text = "Commands were repatched." if patched else "No matching commands were patched. This can happen if Modmail uses different command names."
-        await ctx.send(embed=self.make_embed("Repatch Complete", text, discord.Color.green() if patched else discord.Color.orange()))
-
-    async def cog_unload(self):
-        await self.unpatch_commands()
+        await self.patch_commands()
+        await ctx.send(embed=self.make_embed("Repatch Complete", "The plugin repatched all target commands.", discord.Color.green()))
 
 
 async def setup(bot):
