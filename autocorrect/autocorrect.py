@@ -1,4 +1,7 @@
 import re
+import inspect
+from functools import wraps
+
 import discord
 from discord.ext import commands
 
@@ -7,6 +10,33 @@ class AutoCorrect(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.coll = bot.api.get_plugin_partition(self)
+        self.patched_commands = {}
+        self.message_param_names = {
+            "msg",
+            "message",
+            "text",
+            "content",
+            "body",
+            "reply",
+            "response",
+            "value",
+        }
+
+        self.default_target_commands = [
+            "reply",
+            "freply",
+            "fpreply",
+            "fareply",
+            "areply",
+            "anonreply",
+            "ar",
+            "r",
+            "fr",
+            "fpr",
+            "far",
+            "snippet",
+            "snippets",
+        ]
 
         self.word_map = {
             "u": "you",
@@ -24,6 +54,7 @@ class AutoCorrect(commands.Cog):
             "bc": "because",
             "cuz": "because",
             "coz": "because",
+            "cus": "because",
             "abt": "about",
             "tho": "though",
             "wont": "won't",
@@ -82,7 +113,6 @@ class AutoCorrect(commands.Cog):
             "yep": "yes",
             "yea": "yeah",
             "msg": "message",
-            "dm": "direct message",
             "acc": "account",
             "prob": "problem",
             "vid": "video",
@@ -107,7 +137,6 @@ class AutoCorrect(commands.Cog):
             "gm": "good morning",
             "ge": "good evening",
             "bro": "bro",
-            "cus": "because",
             "thru": "through",
             "wiv": "with",
             "som1": "someone",
@@ -148,14 +177,17 @@ class AutoCorrect(commands.Cog):
             "wqork": "work",
             "rgohjt": "right",
             "fukl": "full",
+            "yo": "yo",
         }
 
         self.phrase_map = {
             r"\bhi hru\b": "Hi, how are you",
             r"\bhey hru\b": "Hey, how are you",
             r"\bhello hru\b": "Hello, how are you",
+            r"\byo hru\b": "Yo, how are you",
             r"\bhi wyd\b": "Hi, what are you doing",
             r"\bhey wyd\b": "Hey, what are you doing",
+            r"\byo wyd\b": "Yo, what are you doing",
             r"\bcan u\b": "can you",
             r"\bcould u\b": "could you",
             r"\bwould u\b": "would you",
@@ -196,7 +228,6 @@ class AutoCorrect(commands.Cog):
             r"\bsend me ur\b": "send me your",
             r"\bgive me ur\b": "give me your",
             r"\bmsg me\b": "message me",
-            r"\bdm me\b": "direct message me",
             r"\blmk if\b": "let me know if",
             r"\blmk when\b": "let me know when",
             r"\bbrb\b": "be right back",
@@ -234,6 +265,9 @@ class AutoCorrect(commands.Cog):
             r"\bive sent\b": "I've sent",
             r"\bive made\b": "I've made",
             r"\bive been\b": "I've been",
+            r"\byo bro\b": "Yo, bro",
+            r"\byo man\b": "Yo, man",
+            r"\byo dude\b": "Yo, dude",
         }
 
     async def cog_load(self):
@@ -242,16 +276,14 @@ class AutoCorrect(commands.Cog):
             {
                 "$setOnInsert": {
                     "enabled": True,
-                    "mode": "dm",
-                    "dm_corrected_text": True,
-                    "thread_notice": False,
-                    "thread_notice_title": "Corrected Message",
-                    "thread_notice_template": "**Original:** {original}\n**Corrected:** {corrected}",
-                    "dm_template": "Did you mean:\n\n{corrected}"
+                    "target_commands": self.default_target_commands,
                 }
             },
             upsert=True,
         )
+
+    async def on_plugins_ready(self):
+        await self.patch_commands()
 
     async def get_config(self):
         data = await self.coll.find_one({"_id": "config"})
@@ -259,12 +291,7 @@ class AutoCorrect(commands.Cog):
             data = {
                 "_id": "config",
                 "enabled": True,
-                "mode": "dm",
-                "dm_corrected_text": True,
-                "thread_notice": False,
-                "thread_notice_title": "Corrected Message",
-                "thread_notice_template": "**Original:** {original}\n**Corrected:** {corrected}",
-                "dm_template": "Did you mean:\n\n{corrected}"
+                "target_commands": self.default_target_commands,
             }
             await self.coll.insert_one(data)
         return data
@@ -275,96 +302,11 @@ class AutoCorrect(commands.Cog):
     def make_embed(self, title, description, color=discord.Color.blurple()):
         return discord.Embed(title=title, description=description, color=color)
 
-    async def get_prefixes(self, message):
-        prefixes = []
-        bot_prefix = getattr(self.bot, "command_prefix", None)
-
-        if callable(bot_prefix):
-            try:
-                value = bot_prefix(self.bot, message)
-                if hasattr(value, "__await__"):
-                    value = await value
-                if isinstance(value, str):
-                    prefixes.append(value)
-                elif isinstance(value, (list, tuple, set)):
-                    prefixes.extend([p for p in value if isinstance(p, str)])
-            except Exception:
-                pass
-        elif isinstance(bot_prefix, str):
-            prefixes.append(bot_prefix)
-        elif isinstance(bot_prefix, (list, tuple, set)):
-            prefixes.extend([p for p in bot_prefix if isinstance(p, str)])
-
-        config = getattr(self.bot, "config", None)
-        if config:
-            for key in ("prefix", "command_prefix"):
-                try:
-                    value = getattr(config, key, None)
-                    if isinstance(value, str) and value not in prefixes:
-                        prefixes.append(value)
-                except Exception:
-                    pass
-                try:
-                    value = config.get(key)
-                    if isinstance(value, str) and value not in prefixes:
-                        prefixes.append(value)
-                except Exception:
-                    pass
-
-        try:
-            value = getattr(self.bot, "prefix", None)
-            if isinstance(value, str) and value not in prefixes:
-                prefixes.append(value)
-        except Exception:
-            pass
-
-        for p in ["?", ".", "!"]:
-            if p not in prefixes:
-                prefixes.append(p)
-
-        clean = []
-        seen = set()
-        for p in prefixes:
-            if p and p not in seen:
-                seen.add(p)
-                clean.append(p)
-
-        clean.sort(key=len, reverse=True)
-        return clean
-
-    def should_run(self, message, config):
-        if message.author.bot:
-            return False
-
-        if message.webhook_id is not None:
-            return False
-
-        if message.embeds:
-            return False
-
-        if not message.content or not message.content.strip():
-            return False
-
-        if not config.get("enabled", True):
-            return False
-
-        mode = config.get("mode", "dm")
-
-        if mode == "dm":
-            return message.guild is None
-
-        if mode == "channels":
-            return message.guild is not None
-
-        return True
-
     def fix_tokens(self, text):
         parts = re.split(r"(\s+)", text)
         fixed = []
-
         for part in parts:
             fixed.append(self.word_map.get(part.lower(), part))
-
         return "".join(fixed)
 
     def fix_common_patterns(self, text):
@@ -381,7 +323,6 @@ class AutoCorrect(commands.Cog):
     def smart_capitalize(self, text):
         if not text:
             return text
-
         text = text[0].upper() + text[1:]
 
         def repl(match):
@@ -399,10 +340,11 @@ class AutoCorrect(commands.Cog):
 
         lowered = stripped.lower()
         question_starts = (
-            "how", "what", "why", "when", "where", "who", "are", "is", "do", "did",
-            "does", "can", "could", "would", "will", "have", "has", "had", "should"
+            "how", "what", "why", "when", "where", "who", "are", "is",
+            "do", "did", "does", "can", "could", "would", "will", "have",
+            "has", "had", "should"
         )
-        excited_starts = ("hi", "hello", "hey", "thanks", "thank you")
+        excited_starts = ("hi", "hello", "hey", "yo", "thanks", "thank you")
 
         if lowered.startswith(question_starts):
             return stripped + "?"
@@ -426,91 +368,136 @@ class AutoCorrect(commands.Cog):
         corrected = re.sub(r"\bhi,?\s+how are you\b", "Hi, how are you", corrected, flags=re.IGNORECASE)
         corrected = re.sub(r"\bhey,?\s+how are you\b", "Hey, how are you", corrected, flags=re.IGNORECASE)
         corrected = re.sub(r"\bhello,?\s+how are you\b", "Hello, how are you", corrected, flags=re.IGNORECASE)
+        corrected = re.sub(r"\byo,?\s+how are you\b", "Yo, how are you", corrected, flags=re.IGNORECASE)
 
         if corrected:
             corrected = corrected[0].upper() + corrected[1:]
 
         return corrected
 
-    async def send_dm_corrected_text(self, user, corrected, config):
-        if not config.get("dm_corrected_text", True):
-            return
+    def _command_matches(self, command, names):
+        if command is None:
+            return False
 
-        template = config.get("dm_template", "Did you mean:\n\n{corrected}")
-        content = template.replace("{corrected}", corrected)
+        all_names = {command.name.lower(), command.qualified_name.lower()}
+        all_names.update(alias.lower() for alias in command.aliases)
 
+        for name in names:
+            if name.lower() in all_names:
+                return True
+        return False
+
+    def _get_correctable_param_names(self, callback):
         try:
-            await user.send(content)
+            sig = inspect.signature(callback)
         except Exception:
-            pass
+            return []
 
-    async def send_thread_notice(self, user, original, corrected, config):
-        if not config.get("thread_notice", False):
-            return
+        found = []
+        for name, param in sig.parameters.items():
+            lowered = name.lower()
+            if lowered in {"self", "ctx", "context"}:
+                continue
+            if lowered in self.message_param_names:
+                found.append(name)
 
-        thread = None
+        return found
 
-        if hasattr(self.bot, "threads"):
-            cache = getattr(self.bot, "threads", None)
-            if isinstance(cache, dict):
-                thread = cache.get(user.id) or cache.get(str(user.id))
+    async def patch_commands(self):
+        config = await self.get_config()
+        target_names = [x.lower() for x in config.get("target_commands", self.default_target_commands)]
+        patched_any = False
 
-        if thread is None and hasattr(self.bot, "thread_manager"):
-            manager = getattr(self.bot, "thread_manager", None)
-            if manager:
-                for method_name in ("find", "get", "find_thread", "get_thread"):
-                    method = getattr(manager, method_name, None)
-                    if callable(method):
-                        try:
-                            maybe = method(user.id)
-                            thread = await maybe if hasattr(maybe, "__await__") else maybe
-                            if thread:
-                                break
-                        except Exception:
-                            pass
+        for command in self.bot.walk_commands():
+            if not self._command_matches(command, target_names):
+                continue
 
-        channel = getattr(thread, "channel", None) if thread else None
-        if not isinstance(channel, discord.TextChannel):
-            return
+            key = command.qualified_name.lower()
+            if key in self.patched_commands:
+                continue
 
-        template = config.get("thread_notice_template", "**Original:** {original}\n**Corrected:** {corrected}")
-        description = template.replace("{original}", original).replace("{corrected}", corrected)
+            original = command.callback
+            param_names = self._get_correctable_param_names(original)
+            if not param_names:
+                continue
 
-        embed = discord.Embed(
-            title=config.get("thread_notice_title", "Corrected Message"),
-            description=description[:4096],
-            color=discord.Color.blurple()
-        )
+            @wraps(original)
+            async def wrapped(*args, __original=original, __param_names=param_names, **kwargs):
+                cfg = await self.get_config()
+                if not cfg.get("enabled", True):
+                    return await __original(*args, **kwargs)
 
-        try:
-            await channel.send(embed=embed)
-        except Exception:
-            pass
+                try:
+                    sig = inspect.signature(__original)
+                    bound = sig.bind_partial(*args, **kwargs)
+                except Exception:
+                    return await __original(*args, **kwargs)
+
+                changed = False
+
+                for param_name in __param_names:
+                    if param_name in bound.arguments and isinstance(bound.arguments[param_name], str):
+                        original_text = bound.arguments[param_name]
+                        corrected_text = self.autocorrect_text(original_text)
+                        if corrected_text != original_text:
+                            bound.arguments[param_name] = corrected_text
+                            changed = True
+
+                if not changed:
+                    for name, value in list(bound.arguments.items()):
+                        lowered = name.lower()
+                        if lowered in {"self", "ctx", "context"}:
+                            continue
+                        if lowered not in self.message_param_names:
+                            continue
+                        if not isinstance(value, str):
+                            continue
+
+                        corrected_text = self.autocorrect_text(value)
+                        if corrected_text != value:
+                            bound.arguments[name] = corrected_text
+                            changed = True
+
+                if hasattr(bound, "args") and hasattr(bound, "kwargs"):
+                    return await __original(*bound.args, **bound.kwargs)
+
+                return await __original(*args, **kwargs)
+
+            self.patched_commands[key] = {
+                "command": command,
+                "original": original,
+            }
+            command.callback = wrapped
+            patched_any = True
+
+        return patched_any
+
+    async def unpatch_commands(self):
+        for data in self.patched_commands.values():
+            data["command"].callback = data["original"]
+        self.patched_commands.clear()
 
     @commands.group(name="autocorrect", invoke_without_command=True)
     @commands.guild_only()
     @commands.has_permissions(administrator=True)
     async def autocorrect_group(self, ctx):
         config = await self.get_config()
+        targets = config.get("target_commands", self.default_target_commands)
 
         embed = discord.Embed(title="AutoCorrect Settings", color=discord.Color.blurple())
         embed.add_field(name="Enabled", value="Yes" if config.get("enabled", True) else "No", inline=False)
-        embed.add_field(name="Mode", value=config.get("mode", "dm"), inline=False)
-        embed.add_field(name="DM Corrected Text", value="Yes" if config.get("dm_corrected_text", True) else "No", inline=False)
-        embed.add_field(name="Thread Notice", value="Yes" if config.get("thread_notice", False) else "No", inline=False)
+        embed.add_field(name="Patched Commands", value=", ".join(f"`{x}`" for x in targets[:30]) or "None", inline=False)
         embed.add_field(
             name="Commands",
             value=(
                 f"`{ctx.prefix}autocorrect enable`\n"
                 f"`{ctx.prefix}autocorrect disable`\n"
-                f"`{ctx.prefix}autocorrect channels`\n"
-                f"`{ctx.prefix}autocorrect all`\n"
-                f"`{ctx.prefix}autocorrect dm`\n"
-                f"`{ctx.prefix}autocorrect dmon`\n"
-                f"`{ctx.prefix}autocorrect dmoff`\n"
-                f"`{ctx.prefix}autocorrect noticeon`\n"
-                f"`{ctx.prefix}autocorrect noticeoff`\n"
-                f"`{ctx.prefix}autocorrect test <text>`"
+                f"`{ctx.prefix}autocorrect test <text>`\n"
+                f"`{ctx.prefix}autocorrect listcmds`\n"
+                f"`{ctx.prefix}autocorrect addcmd <command>`\n"
+                f"`{ctx.prefix}autocorrect removecmd <command>`\n"
+                f"`{ctx.prefix}autocorrect resetcmds`\n"
+                f"`{ctx.prefix}autocorrect repatch`"
             ),
             inline=False,
         )
@@ -521,63 +508,14 @@ class AutoCorrect(commands.Cog):
     @commands.has_permissions(administrator=True)
     async def autocorrect_enable(self, ctx):
         await self.update_config(enabled=True)
-        await ctx.send(embed=self.make_embed("AutoCorrect Enabled", "AutoCorrect is now enabled.", discord.Color.green()))
+        await ctx.send(embed=self.make_embed("AutoCorrect Enabled", "Reply-style commands will now autocorrect their message text.", discord.Color.green()))
 
     @autocorrect_group.command(name="disable")
     @commands.guild_only()
     @commands.has_permissions(administrator=True)
     async def autocorrect_disable(self, ctx):
         await self.update_config(enabled=False)
-        await ctx.send(embed=self.make_embed("AutoCorrect Disabled", "AutoCorrect is now disabled.", discord.Color.orange()))
-
-    @autocorrect_group.command(name="channels")
-    @commands.guild_only()
-    @commands.has_permissions(administrator=True)
-    async def autocorrect_channels(self, ctx):
-        await self.update_config(mode="channels")
-        await ctx.send(embed=self.make_embed("Mode Updated", "AutoCorrect will only run in server and thread channels.", discord.Color.green()))
-
-    @autocorrect_group.command(name="all")
-    @commands.guild_only()
-    @commands.has_permissions(administrator=True)
-    async def autocorrect_all(self, ctx):
-        await self.update_config(mode="all")
-        await ctx.send(embed=self.make_embed("Mode Updated", "AutoCorrect will run in all supported messages.", discord.Color.green()))
-
-    @autocorrect_group.command(name="dm")
-    @commands.guild_only()
-    @commands.has_permissions(administrator=True)
-    async def autocorrect_dm(self, ctx):
-        await self.update_config(mode="dm")
-        await ctx.send(embed=self.make_embed("Mode Updated", "AutoCorrect will only run in DMs.", discord.Color.green()))
-
-    @autocorrect_group.command(name="dmon")
-    @commands.guild_only()
-    @commands.has_permissions(administrator=True)
-    async def autocorrect_dmon(self, ctx):
-        await self.update_config(dm_corrected_text=True)
-        await ctx.send(embed=self.make_embed("DM Corrected Text Enabled", "Users will receive the corrected text in DM.", discord.Color.green()))
-
-    @autocorrect_group.command(name="dmoff")
-    @commands.guild_only()
-    @commands.has_permissions(administrator=True)
-    async def autocorrect_dmoff(self, ctx):
-        await self.update_config(dm_corrected_text=False)
-        await ctx.send(embed=self.make_embed("DM Corrected Text Disabled", "Users will no longer receive the corrected text in DM.", discord.Color.orange()))
-
-    @autocorrect_group.command(name="noticeon")
-    @commands.guild_only()
-    @commands.has_permissions(administrator=True)
-    async def autocorrect_noticeon(self, ctx):
-        await self.update_config(thread_notice=True)
-        await ctx.send(embed=self.make_embed("Thread Notice Enabled", "The thread correction notice embed is now enabled.", discord.Color.green()))
-
-    @autocorrect_group.command(name="noticeoff")
-    @commands.guild_only()
-    @commands.has_permissions(administrator=True)
-    async def autocorrect_noticeoff(self, ctx):
-        await self.update_config(thread_notice=False)
-        await ctx.send(embed=self.make_embed("Thread Notice Disabled", "The thread correction notice embed is now disabled.", discord.Color.orange()))
+        await ctx.send(embed=self.make_embed("AutoCorrect Disabled", "Reply-style commands will no longer autocorrect their message text.", discord.Color.orange()))
 
     @autocorrect_group.command(name="test")
     @commands.guild_only()
@@ -589,26 +527,67 @@ class AutoCorrect(commands.Cog):
         embed.add_field(name="Corrected", value=corrected[:1024], inline=False)
         await ctx.send(embed=embed)
 
-    @commands.Cog.listener()
-    async def on_message(self, message):
+    @autocorrect_group.command(name="listcmds")
+    @commands.guild_only()
+    @commands.has_permissions(administrator=True)
+    async def autocorrect_listcmds(self, ctx):
         config = await self.get_config()
+        targets = config.get("target_commands", self.default_target_commands)
+        await ctx.send(embed=self.make_embed("Target Commands", "\n".join(f"`{x}`" for x in targets) or "None set."))
 
-        if not self.should_run(message, config):
-            return
+    @autocorrect_group.command(name="addcmd")
+    @commands.guild_only()
+    @commands.has_permissions(administrator=True)
+    async def autocorrect_addcmd(self, ctx, command_name: str):
+        config = await self.get_config()
+        targets = list(config.get("target_commands", self.default_target_commands))
 
-        prefixes = await self.get_prefixes(message)
-        content = message.content.strip()
+        lowered = command_name.lower()
+        if lowered in [x.lower() for x in targets]:
+            return await ctx.send(embed=self.make_embed("Already Added", f"`{command_name}` is already in the target list.", discord.Color.orange()))
 
-        if any(content.startswith(prefix) for prefix in prefixes):
-            return
+        targets.append(command_name)
+        await self.update_config(target_commands=targets)
+        await self.unpatch_commands()
+        await self.patch_commands()
+        await ctx.send(embed=self.make_embed("Command Added", f"`{command_name}` has been added and commands were repatched.", discord.Color.green()))
 
-        corrected = self.autocorrect_text(content)
+    @autocorrect_group.command(name="removecmd")
+    @commands.guild_only()
+    @commands.has_permissions(administrator=True)
+    async def autocorrect_removecmd(self, ctx, command_name: str):
+        config = await self.get_config()
+        targets = list(config.get("target_commands", self.default_target_commands))
 
-        if corrected == content:
-            return
+        new_targets = [x for x in targets if x.lower() != command_name.lower()]
+        if len(new_targets) == len(targets):
+            return await ctx.send(embed=self.make_embed("Not Found", f"`{command_name}` is not in the target list.", discord.Color.orange()))
 
-        await self.send_dm_corrected_text(message.author, corrected, config)
-        await self.send_thread_notice(message.author, content, corrected, config)
+        await self.update_config(target_commands=new_targets)
+        await self.unpatch_commands()
+        await self.patch_commands()
+        await ctx.send(embed=self.make_embed("Command Removed", f"`{command_name}` has been removed and commands were repatched.", discord.Color.green()))
+
+    @autocorrect_group.command(name="resetcmds")
+    @commands.guild_only()
+    @commands.has_permissions(administrator=True)
+    async def autocorrect_resetcmds(self, ctx):
+        await self.update_config(target_commands=self.default_target_commands)
+        await self.unpatch_commands()
+        await self.patch_commands()
+        await ctx.send(embed=self.make_embed("Commands Reset", "Target commands were reset to the default reply-style list.", discord.Color.green()))
+
+    @autocorrect_group.command(name="repatch")
+    @commands.guild_only()
+    @commands.has_permissions(administrator=True)
+    async def autocorrect_repatch(self, ctx):
+        await self.unpatch_commands()
+        patched = await self.patch_commands()
+        text = "Commands were repatched." if patched else "No matching commands were patched. This can happen if Modmail uses different command names."
+        await ctx.send(embed=self.make_embed("Repatch Complete", text, discord.Color.green() if patched else discord.Color.orange()))
+
+    async def cog_unload(self):
+        await self.unpatch_commands()
 
 
 async def setup(bot):
