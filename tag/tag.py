@@ -1,9 +1,5 @@
-import re
-import discord
-from discord.ext import commands
-from core import checks
+from core.checks import has_permissions
 from core.models import PermissionLevel
-
 
 class Tagging(commands.Cog):
     def __init__(self, bot):
