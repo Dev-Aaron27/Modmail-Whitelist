@@ -307,7 +307,7 @@ class AutoCorrect(commands.Cog):
         text = re.sub(r"\bi\b", "I", text)
         text = re.sub(r"\s+([,.!?])", r"\1", text)
         text = re.sub(r"([,.!?])([A-Za-z])", r"\1 \2", text)
-        text = re.sub(r"\s{2,}", " ", text)
+        text = re.sub(r"[ 	]{2,}", " ", text)
         return text.strip()
 
     def smart_capitalize(self, text):
