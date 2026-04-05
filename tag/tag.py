@@ -1,6 +1,8 @@
 import re
 import discord
 from discord.ext import commands
+from core import checks
+from core.models import PermissionLevel
 
 
 class Tagging(commands.Cog):
@@ -53,17 +55,13 @@ class Tagging(commands.Cog):
 
     def remove_existing_tag(self, channel_name: str, append: str) -> str:
         if append and append in channel_name:
-            first_part, rest = channel_name.split(append, 1)
-            if first_part and re.fullmatch(r"[a-z0-9\-_]+", first_part):
+            first, rest = channel_name.split(append, 1)
+            if first and re.fullmatch(r"[a-z0-9\-_]+", first):
                 return rest.lstrip("-_ ")
-        if channel_name.startswith("[") and "]" in channel_name:
-            parts = channel_name.split("]", 1)
-            if len(parts) == 2:
-                return parts[1].lstrip("-_ ")
         return channel_name
 
     @commands.group(name="tagging", invoke_without_command=True)
-    @commands.guild_only()
+    @checks.has_permissions(PermissionLevel.ADMINISTRATOR)
     async def tagging_group(self, ctx):
         cfg = await self.get_config()
 
@@ -86,22 +84,19 @@ class Tagging(commands.Cog):
         await ctx.send(embed=embed)
 
     @tagging_group.command(name="enable")
-    @commands.guild_only()
-    @commands.has_permissions(administrator=True)
+    @checks.has_permissions(PermissionLevel.ADMINISTRATOR)
     async def tagging_enable(self, ctx):
         await self.update_config(enabled=True)
         await ctx.send(embed=self.make_embed("Tagging Enabled", "Channel tagging is now enabled.", discord.Color.green()))
 
     @tagging_group.command(name="disable")
-    @commands.guild_only()
-    @commands.has_permissions(administrator=True)
+    @checks.has_permissions(PermissionLevel.ADMINISTRATOR)
     async def tagging_disable(self, ctx):
         await self.update_config(enabled=False)
         await ctx.send(embed=self.make_embed("Tagging Disabled", "Channel tagging is now disabled.", discord.Color.orange()))
 
     @tagging_group.command(name="maxlength")
-    @commands.guild_only()
-    @commands.has_permissions(administrator=True)
+    @checks.has_permissions(PermissionLevel.ADMINISTRATOR)
     async def tagging_maxlength(self, ctx, number: int):
         if number < 1 or number > 30:
             return await ctx.send(embed=self.make_embed("Invalid Length", "Choose a number between 1 and 30.", discord.Color.red()))
@@ -110,8 +105,7 @@ class Tagging(commands.Cog):
         await ctx.send(embed=self.make_embed("Max Length Updated", f"Tag max length is now `{number}`.", discord.Color.green()))
 
     @commands.command(name="tagappend")
-    @commands.guild_only()
-    @commands.has_permissions(administrator=True)
+    @checks.has_permissions(PermissionLevel.ADMINISTRATOR)
     async def tagappend_command(self, ctx, *, text: str):
         text = text.strip()
         if not text:
@@ -124,12 +118,15 @@ class Tagging(commands.Cog):
         await ctx.send(embed=self.make_embed("Tag Append Updated", f"New tag append is now:\n`{text}`", discord.Color.green()))
 
     @commands.command(name="tag")
-    @commands.guild_only()
-    @commands.has_permissions(manage_messages=True)
-    async def tag_command(self, ctx, *, text: str):
+    @checks.has_permissions(PermissionLevel.SUPPORT)
+    async def tag_command(self, ctx, *, text: str = None):
         cfg = await self.get_config()
+
         if not cfg.get("enabled", True):
             return await ctx.send(embed=self.make_embed("Disabled", "Tagging is currently disabled.", discord.Color.orange()))
+
+        if not text:
+            return await ctx.send(embed=self.make_embed("Usage", f"`{ctx.prefix}tag <text>`", discord.Color.red()))
 
         thread = await self.bot.threads.find(channel=ctx.channel)
         if thread is None:
@@ -147,7 +144,10 @@ class Tagging(commands.Cog):
 
         if len(new_name) > 100:
             overflow = len(new_name) - 100
-            base_name = base_name[:-overflow] if overflow < len(base_name) else base_name[:1]
+            if overflow >= len(base_name):
+                base_name = base_name[:1]
+            else:
+                base_name = base_name[:-overflow]
             new_name = f"{cleaned}{append}{base_name}"
 
         try:
@@ -155,13 +155,13 @@ class Tagging(commands.Cog):
         except discord.HTTPException as e:
             return await ctx.send(embed=self.make_embed("Failed", f"Could not rename the channel.\n`{e}`", discord.Color.red()))
 
-        await ctx.send(embed=self.make_embed("Tag Added", f"Channel tag set to `{cleaned}` using append `{append}`.", discord.Color.green()))
+        await ctx.send(embed=self.make_embed("Tag Added", f"New channel name:\n`{new_name}`", discord.Color.green()))
 
     @commands.command(name="untag")
-    @commands.guild_only()
-    @commands.has_permissions(manage_messages=True)
+    @checks.has_permissions(PermissionLevel.SUPPORT)
     async def untag_command(self, ctx):
         cfg = await self.get_config()
+
         if not cfg.get("enabled", True):
             return await ctx.send(embed=self.make_embed("Disabled", "Tagging is currently disabled.", discord.Color.orange()))
 
@@ -181,7 +181,7 @@ class Tagging(commands.Cog):
         except discord.HTTPException as e:
             return await ctx.send(embed=self.make_embed("Failed", f"Could not rename the channel.\n`{e}`", discord.Color.red()))
 
-        await ctx.send(embed=self.make_embed("Tag Removed", "The channel tag was removed.", discord.Color.green()))
+        await ctx.send(embed=self.make_embed("Tag Removed", f"New channel name:\n`{new_name}`", discord.Color.green()))
 
 
 async def setup(bot):
