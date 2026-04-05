@@ -1,5 +1,9 @@
-from core.checks import has_permissions
+import re
+import discord
+from discord.ext import commands
+from core import checks
 from core.models import PermissionLevel
+
 
 class Tagging(commands.Cog):
     def __init__(self, bot):
@@ -102,11 +106,11 @@ class Tagging(commands.Cog):
 
     @commands.command(name="tagappend")
     @checks.has_permissions(PermissionLevel.ADMINISTRATOR)
-    async def tagappend_command(self, ctx, *, text: str):
-        text = text.strip()
+    async def tagappend_command(self, ctx, *, text: str = None):
         if not text:
-            return await ctx.send(embed=self.make_embed("Invalid Append", "You need to give some text or emoji.", discord.Color.red()))
+            return await ctx.send(embed=self.make_embed("Usage", f"`{ctx.prefix}tagappend <text/emoji>`", discord.Color.red()))
 
+        text = text.strip()
         if len(text) > 20:
             return await ctx.send(embed=self.make_embed("Too Long", "Keep the tag append under 20 characters.", discord.Color.red()))
 
@@ -114,7 +118,7 @@ class Tagging(commands.Cog):
         await ctx.send(embed=self.make_embed("Tag Append Updated", f"New tag append is now:\n`{text}`", discord.Color.green()))
 
     @commands.command(name="tag")
-    @checks.has_permissions(PermissionLevel.SUPPORT)
+    @checks.has_permissions(PermissionLevel.SUPPORTER)
     async def tag_command(self, ctx, *, text: str = None):
         cfg = await self.get_config()
 
@@ -154,7 +158,7 @@ class Tagging(commands.Cog):
         await ctx.send(embed=self.make_embed("Tag Added", f"New channel name:\n`{new_name}`", discord.Color.green()))
 
     @commands.command(name="untag")
-    @checks.has_permissions(PermissionLevel.SUPPORT)
+    @checks.has_permissions(PermissionLevel.SUPPORTER)
     async def untag_command(self, ctx):
         cfg = await self.get_config()
 
